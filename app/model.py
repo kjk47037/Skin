@@ -202,9 +202,7 @@ def load_model_once() -> None:
 		model.eval()
 		_MODEL = model.to(_DEVICE)
 		
-		# Set optimal number of threads for CPU inference
-		if not torch.cuda.is_available():
-			torch.set_num_threads(0)  # Use all available CPU cores
+		# PyTorch uses all available CPU cores by default, no need to set explicitly
 		
 		# Try to convert to ONNX for future faster inference
 		if use_onnx and not os.path.exists(onnx_path):
