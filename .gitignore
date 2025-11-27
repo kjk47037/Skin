@@ -1,0 +1,52 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs
+*.log
+logs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE/editor
+.idea/
+.vscode/
+
+# Cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Mac OS
+.DS_Store
+
+# Optional: ignore large model files unless you plan to commit via Git LFS
+# Uncomment the next line to ignore all .pth files by default
+# models/*.pth
+
+
