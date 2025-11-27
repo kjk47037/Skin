@@ -12,6 +12,8 @@ models/
   efficientnet_full_model.pth  # your trained model (or download at runtime)
 requirements.txt
 Procfile
+Dockerfile     # Optimized for Railway (CPU-only PyTorch to reduce image size)
+.dockerignore  # Excludes unnecessary files from Docker build
 ```
 
 ### Run locally
@@ -57,7 +59,7 @@ git push -u origin main
 
 2) On Railway:
    - New Project → Deploy from GitHub → choose this repo
-   - Railway auto-detects Python and uses `Procfile`
+   - Railway will detect the `Dockerfile` and use it (CPU-only PyTorch keeps image < 4GB)
    - Set environment variables (Settings → Variables) as needed:
      - `MODEL_PATH` (default: `models/efficientnet_full_model.pth`)
      - `MODEL_DOWNLOAD_URL` (if not committing the model to Git)
@@ -72,7 +74,9 @@ git push -u origin main
 
 ### Notes
 
+- **Image Size**: The Dockerfile uses CPU-only PyTorch (much smaller than CUDA version) to keep the image under Railway's 4GB limit. The model will run on CPU, which is fine for inference.
 - The loader tries TorchScript first, then falls back to `torch.load`. If the file is a state dict, it builds an EfficientNet-B0 head and loads with `strict=False`. If your training architecture differs, update `app/model.py` accordingly.
 - The default image preprocessing uses 224x224 ImageNet normalization. For best accuracy, match your training-time transforms.
+- **Acne exclusion**: The API filters out "Acne" from all predictions (it will never appear in results).
 
 

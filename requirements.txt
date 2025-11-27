@@ -3,8 +3,6 @@ uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 Pillow==10.4.0
 numpy==1.26.4
-torch
-torchvision
 requests==2.32.3
 efficientnet_pytorch==0.7.1
 
