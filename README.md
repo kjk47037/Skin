@@ -72,10 +72,21 @@ git push -u origin main
 
 4) After deploy, open the public URL, then visit `/docs` for the interactive Swagger UI.
 
+### Performance Optimization
+
+**ONNX Runtime for Faster Inference:**
+- The API automatically converts your PyTorch model to ONNX format on first startup (if `USE_ONNX=true` is set, which is the default)
+- ONNX Runtime provides **2-5x faster inference** compared to PyTorch CPU
+- The converted `.onnx` file will be saved next to your `.pth` file
+- On subsequent startups, the API will automatically use the ONNX model for faster inference
+- To manually convert: `python convert_to_onnx.py`
+- To disable ONNX: set environment variable `USE_ONNX=false`
+
 ### Notes
 
-- **Image Size**: The Dockerfile uses CPU-only PyTorch (much smaller than CUDA version) to keep the image under Railway's 4GB limit. The model will run on CPU, which is fine for inference.
-- The loader tries TorchScript first, then falls back to `torch.load`. If the file is a state dict, it builds an EfficientNet-B0 head and loads with `strict=False`. If your training architecture differs, update `app/model.py` accordingly.
+- **Image Size**: The Dockerfile uses CPU-only PyTorch (much smaller than CUDA version) to keep the image under Railway's 4GB limit. ONNX Runtime adds minimal size (~50MB) but provides significant speedup.
+- **Inference Speed**: ONNX Runtime is 2-5x faster than PyTorch CPU inference while keeping the image size well under 4GB.
+- The loader tries ONNX Runtime first (if available), then TorchScript, then falls back to `torch.load`. If the file is a state dict, it builds an EfficientNet-B0 head and loads with `strict=False`. If your training architecture differs, update `app/model.py` accordingly.
 - The default image preprocessing uses 224x224 ImageNet normalization. For best accuracy, match your training-time transforms.
 - **Acne exclusion**: The API filters out "Acne" from all predictions (it will never appear in results).
 

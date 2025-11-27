@@ -13,11 +13,20 @@ try:
 except Exception:  # pragma: no cover
 	requests = None  # type: ignore
 
+try:
+	import onnxruntime as ort
+	ONNX_AVAILABLE = True
+except ImportError:
+	ONNX_AVAILABLE = False
+	ort = None  # type: ignore
+
 
 _MODEL: Optional[torch.nn.Module] = None
+_ONNX_SESSION: Optional[object] = None  # ONNX Runtime session
 _DEVICE: Optional[torch.device] = None
 _LABELS: Optional[List[str]] = None
 _TRANSFORM: Optional[transforms.Compose] = None
+_USE_ONNX: bool = False
 
 
 _DEFAULT_LABELS = [
@@ -96,9 +105,30 @@ def _build_efficientnet_for(num_classes: int) -> torch.nn.Module:
 	return model
 
 
+def _convert_to_onnx(model: torch.nn.Module, model_path: str, onnx_path: str) -> None:
+	"""Convert PyTorch model to ONNX format for faster inference."""
+	model.eval()
+	dummy_input = torch.randn(1, 3, 224, 224)
+	
+	try:
+		torch.onnx.export(
+			model,
+			dummy_input,
+			onnx_path,
+			export_params=True,
+			opset_version=11,
+			do_constant_folding=True,
+			input_names=["input"],
+			output_names=["output"],
+			dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+		)
+	except Exception as e:
+		raise RuntimeError(f"Failed to convert model to ONNX: {e}") from e
+
+
 def load_model_once() -> None:
-	global _MODEL, _DEVICE, _TRANSFORM
-	if _MODEL is not None:
+	global _MODEL, _ONNX_SESSION, _DEVICE, _TRANSFORM, _USE_ONNX
+	if _MODEL is not None or _ONNX_SESSION is not None:
 		return
 
 	_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -108,39 +138,84 @@ def load_model_once() -> None:
 	model_path = os.environ.get("MODEL_PATH", "models/efficientnet_full_model.pth")
 	_ensure_model_file(model_path)
 
-	# Try multiple loading strategies to maximize compatibility
-	model: Optional[torch.nn.Module] = None
-	load_error: Optional[Exception] = None
-
-	# 1) TorchScript
-	try:
-		model = torch.jit.load(model_path, map_location=_DEVICE)
-	except Exception as exc:  # pragma: no cover
-		load_error = exc
-
-	# 2) Full model object or state dict
-	if model is None:
+	# Try to use ONNX Runtime for faster inference (if available)
+	onnx_path = model_path.replace(".pth", ".onnx")
+	use_onnx = ONNX_AVAILABLE and os.environ.get("USE_ONNX", "true").lower() == "true"
+	
+	if use_onnx and os.path.exists(onnx_path):
+		# Load ONNX model directly
 		try:
-			# PyTorch 2.6+ defaults to weights_only=True which can fail for older checkpoints.
-			# We explicitly set weights_only=False assuming the file is trusted.
-			obj = torch.load(model_path, map_location=_DEVICE, weights_only=False)
-			if isinstance(obj, dict):
-				state_dict = obj.get("model_state_dict") or obj.get("state_dict") or obj
-				tmp = _build_efficientnet_for(num_classes)
-				tmp.load_state_dict(state_dict, strict=False)
-				model = tmp
-			else:
-				# If author saved torch.save(model)
-				model = obj
+			# Configure ONNX Runtime for optimal CPU performance
+			sess_options = ort.SessionOptions()
+			sess_options.intra_op_num_threads = 0  # Use all available cores
+			sess_options.inter_op_num_threads = 0
+			sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+			
+			_ONNX_SESSION = ort.InferenceSession(
+				onnx_path,
+				sess_options,
+				providers=["CPUExecutionProvider"]
+			)
+			_USE_ONNX = True
+			print(f"Loaded ONNX model from {onnx_path} (faster inference)")
+		except Exception as e:
+			print(f"Failed to load ONNX model: {e}, falling back to PyTorch")
+			use_onnx = False
+
+	# Load PyTorch model (either for inference or for ONNX conversion)
+	if not _USE_ONNX:
+		model: Optional[torch.nn.Module] = None
+		load_error: Optional[Exception] = None
+
+		# 1) TorchScript
+		try:
+			model = torch.jit.load(model_path, map_location=_DEVICE)
+			# Optimize TorchScript model for inference
+			try:
+				model = torch.jit.optimize_for_inference(model)
+			except Exception:
+				pass  # Optimization may not be available in all PyTorch versions
 		except Exception as exc:  # pragma: no cover
 			load_error = exc
 
-	if model is None:
-		# Provide meaningful error
-		raise RuntimeError(f"Failed to load model from '{model_path}': {load_error}")
+		# 2) Full model object or state dict
+		if model is None:
+			try:
+				# PyTorch 2.6+ defaults to weights_only=True which can fail for older checkpoints.
+				# We explicitly set weights_only=False assuming the file is trusted.
+				obj = torch.load(model_path, map_location=_DEVICE, weights_only=False)
+				if isinstance(obj, dict):
+					state_dict = obj.get("model_state_dict") or obj.get("state_dict") or obj
+					tmp = _build_efficientnet_for(num_classes)
+					tmp.load_state_dict(state_dict, strict=False)
+					model = tmp
+				else:
+					# If author saved torch.save(model)
+					model = obj
+			except Exception as exc:  # pragma: no cover
+				load_error = exc
 
-	model.eval()
-	_MODEL = model.to(_DEVICE)
+		if model is None:
+			# Provide meaningful error
+			raise RuntimeError(f"Failed to load model from '{model_path}': {load_error}")
+
+		model.eval()
+		_MODEL = model.to(_DEVICE)
+		
+		# Set optimal number of threads for CPU inference
+		if not torch.cuda.is_available():
+			torch.set_num_threads(0)  # Use all available CPU cores
+		
+		# Try to convert to ONNX for future faster inference
+		if use_onnx and not os.path.exists(onnx_path):
+			try:
+				print(f"Converting model to ONNX format (one-time conversion)...")
+				# Ensure model is on CPU for ONNX conversion
+				model_cpu = model.cpu() if _DEVICE.type == "cuda" else model
+				_convert_to_onnx(model_cpu, model_path, onnx_path)
+				print(f"ONNX model saved to {onnx_path}. Restart to use ONNX Runtime.")
+			except Exception as e:
+				print(f"ONNX conversion failed (non-fatal): {e}")
 
 	_TRANSFORM = transforms.Compose(
 		[
@@ -153,7 +228,7 @@ def load_model_once() -> None:
 
 
 def _ensure_loaded() -> None:
-	if _MODEL is None:
+	if _MODEL is None and _ONNX_SESSION is None:
 		load_model_once()
 
 
@@ -175,17 +250,31 @@ def predict_image_pil(image: Image.Image, top_k: int = 5) -> Dict:
 	Note: "Acne" is excluded from all predictions.
 	"""
 	_ensure_loaded()
-	assert _MODEL is not None
 	labels = get_labels()
 	
 	# Exclude "Acne" from predictions
 	EXCLUDED_LABELS = {"Acne"}
-	acne_index = labels.index("Acne") if "Acne" in labels else None
-
-	with torch.no_grad():
-		input_tensor = _preprocess(image)
-		logits = _MODEL(input_tensor)
-		probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+	
+	# Preprocess image
+	rgb = image.convert("RGB")
+	tensor = _TRANSFORM(rgb).unsqueeze(0)  # add batch dimension
+	
+	# Run inference using ONNX Runtime (faster) or PyTorch
+	if _USE_ONNX and _ONNX_SESSION is not None:
+		# ONNX Runtime inference (much faster)
+		input_array = tensor.numpy().astype(np.float32)
+		outputs = _ONNX_SESSION.run(None, {"input": input_array})
+		logits = outputs[0][0]
+		# Softmax
+		exp_logits = np.exp(logits - np.max(logits))
+		probs = exp_logits / exp_logits.sum()
+	else:
+		# PyTorch inference
+		assert _MODEL is not None
+		with torch.no_grad():
+			input_tensor = tensor.to(_DEVICE)
+			logits = _MODEL(input_tensor)
+			probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
 	
 	# Create a mask to exclude Acne
 	valid_indices = [i for i in range(len(labels)) if labels[i] not in EXCLUDED_LABELS]
